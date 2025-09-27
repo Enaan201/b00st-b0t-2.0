@@ -1,43 +1,100 @@
-from flask import Flask, request, Response
+# main.py
+import os
+import json
+import logging
 import traceback
-import json
-import os  # For running system commands
-import tls_client
-import requests
-from logger import *
-import random
-from fingerprints import fps
 from datetime import datetime, timedelta
-import base64
-import json
-import yaml
-import httpx
 from concurrent.futures import ThreadPoolExecutor
 
+# third-party libs you used — keep them if required elsewhere in your project
+import tls_client
+import requests
+import httpx
+import yaml
+import base64
+import random
 
+# your local modules (keep as you had them)
+from logger import *
+from fingerprints import fps
+
+from flask import Flask, request, jsonify, Response
+
+# --- Flask app (single creation) ---
 app = Flask(__name__)
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-@app.route('/hook', methods=['POST'])
+# --- Health / root routes (must exist so browsers & healthchecks don't get 404) ---
+@app.route("/", methods=["GET"])
+def index():
+    return "Hello — app is running!", 200
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify(status="ok"), 200
+
+# --- Webhook route (POST) ---
+@app.route("/hook", methods=["POST"])
 def webhook_handler():
     try:
-        hello = request.get_json()
+        # Use silent=True so it returns None instead of raising on bad content-type
+        payload = request.get_json(silent=True)
+        if not payload:
+            logging.warning("Webhook called without valid JSON payload")
+            return jsonify(error="Invalid or missing JSON"), 400
 
-        item = hello['item']
-        quantity = item['quantity']
-        ip = hello['ip']
-        idkuwu = hello['id']
-        user_agent = hello['user_agent']
-        email = hello['email']
-        links = item.get('custom_fields', {}).get('server link', 'N/A')
+        # Safely extract data with .get to avoid KeyError
+        item = payload.get("item", {})
+        quantity = item.get("quantity")
+        ip = payload.get("ip")
+        idkuwu = payload.get("id")
+        user_agent = payload.get("user_agent")
+        email = payload.get("email")
+        links = item.get("custom_fields", {}).get("server link", "N/A")
 
-        # Format the information to be logged
-        info = f"""
-INVOICE: {idkuwu}
-QUANTITY: {quantity}
-SERVER: {links}
-IP: {ip}
-HEADERS: {user_agent}
+        # Basic validation examples
+        if idkuwu is None:
+            return jsonify(error="Missing id"), 400
+        if item == {} and quantity is None:
+            # either require item or quantity depending on your webhook spec
+            return jsonify(error="Missing item/quantity"), 400
+
+        # Example: format the information to be logged
+        info = (
+            f"INVOICE: {idkuwu}\n"
+            f"QUANTITY: {quantity}\n"
+            f"SERVER: {links}\n"
+            f"IP: {ip}\n"
+            f"USER_AGENT: {user_agent}\n"
+            f"EMAIL: {email}"
+        )
+
+        logging.info("Webhook received:\n%s", info)
+
+        # TODO: do actual processing here (e.g. enqueue work, call other services)
+        # If you need to do heavy work, run it in a background thread to return 200 quickly:
+        # executor = ThreadPoolExecutor(max_workers=4)
+        # executor.submit(do_processing, payload)
+
+        return jsonify(status="received"), 200
+
+    except Exception as e:
+        logging.exception("Exception in webhook_handler: %s", e)
+        # Return a generic error to the caller; don't expose internals
+        return jsonify(error="internal server error"), 500
+
+
+# --- Optional: list registered routes at import time (good for debugging with Gunicorn) ---
+for rule in app.url_map.iter_rules():
+    logging.info("Registered route: %s methods=%s", rule.rule, list(rule.methods))
+
+# --- Run locally only ---
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
 """
         print(info)
         with open('config.yml') as c:
@@ -278,3 +335,4 @@ HEADERS: {user_agent}
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=1010)
+
