@@ -1,4 +1,4 @@
-# main.py
+# main.py (fixed)
 import os
 import json
 import logging
@@ -6,7 +6,7 @@ import traceback
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
-# third-party libs you used — keep them if required elsewhere in your project
+# third-party libs
 import tls_client
 import requests
 import httpx
@@ -14,7 +14,7 @@ import yaml
 import base64
 import random
 
-# your local modules (keep as you had them)
+# local modules
 from logger import *
 from fingerprints import fps
 
@@ -26,14 +26,222 @@ app = Flask(__name__)
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# --- Health / root routes (must exist so browsers & healthchecks don't get 404) ---
+# Load config (if present)
+config = {}
+try:
+    with open('config.yml', 'r') as c:
+        config = yaml.safe_load(c) or {}
+        logging.info("Loaded config.yml")
+except FileNotFoundError:
+    logging.warning("config.yml not found; continuing with defaults")
+except Exception:
+    logging.exception("Failed to load config.yml; continuing with defaults")
+
+
+# --- Helper utilities ---
+def encode_to_base64(json_object):
+    json_str = json.dumps(json_object)
+    json_bytes = json_str.encode("utf-8")
+    base64_bytes = base64.b64encode(json_bytes)
+    return base64_bytes.decode("utf-8")
+
+
+def get_cookies() -> dict:
+    try:
+        response = requests.get("https://discord.com").cookies
+        return {
+            "__dcfduid": response.get("__dcfduid"),
+            "__sdcfduid": response.get("__sdcfduid"),
+            "_cfuvid": response.get("_cfuvid"),
+            "__cfruid": response.get("__cfruid"),
+        }
+    except Exception:
+        return {}
+
+
+def ran_str():
+    return "".join(
+        random.choice("9830da1a6f376cc753f0fbc28d1ffbbe")
+        for _ in range(len("9830da1a6f376cc753f0fbc28d1ffbbe"))
+    )
+
+
+def get_fingerprint():
+    try:
+        resp = httpx.get("https://discord.com/api/v10/experiments", timeout=10.0)
+        return resp.json().get("fingerprint")
+    except Exception:
+        logging.exception("Error fetching fingerprint; retrying")
+        return get_fingerprint()
+
+
+class BTool:
+    def __init__(self, token, invite):
+        self.chrome = "126"
+        fingerprint_dict = random.choice(fps)
+        self.user_agent = fingerprint_dict.get("user-agent")
+        self.x_super_properties = fingerprint_dict.get("x-super-properties")
+        self.session = tls_client.Session(
+            client_identifier="chrome_" + self.chrome, random_tls_extension_order=True
+        )
+        if config.get("UseProxy"):
+            self.session.proxies = {
+                'https': 'http://' + config.get("Proxy"),
+                'http': 'http://' + config.get("Proxy")
+            }
+        else:
+            self.session.proxies = None
+
+        self.full_token = token
+        self.token = token.split(":")[2] if "@" in token else token
+        log("INFO", f"Using [{self.token[:23]}***-***]")
+        self.headers = {
+            "authorization": self.token,
+            "user-agent": self.user_agent,
+            "x-super-properties": self.x_super_properties,
+        }
+        self.join_data = {"session_id": ran_str()}
+        self.guild = None
+        self.invite = invite
+
+    def join_guild(self) -> bool:
+        try:
+            r = self.session.post(
+                f"https://discord.com/api/v9/invites/{self.invite}",
+                headers=self.headers,
+                json=self.join_data,
+                cookies=get_cookies(),
+            )
+            if r.status_code == 200:
+                log("DBG", f"Joined Guild: {self.invite}")
+                self.guild = r.json().get("guild", {}).get("id")
+                return True
+            else:
+                log("ERR", f"Failed To Join Guild: {r.text}")
+                return False
+        except Exception:
+            logging.exception("Exception in join_guild")
+            return False
+
+    def put_boost(self) -> bool:
+        if getattr(self, "guild", None):
+            try:
+                boost_dat = self.session.get(
+                    "https://discord.com/api/v9/users/@me/guilds/premium/subscription-slots",
+                    headers=self.headers,
+                    cookies=get_cookies(),
+                )
+                if boost_dat.status_code == 200:
+                    for boost in boost_dat.json():
+                        boost_id = boost.get("id")
+                        payload = {"user_premium_guild_subscription_slot_ids": [boost_id]}
+                        boosted = self.session.put(
+                            f"https://discord.com/api/v9/guilds/{self.guild}/premium/subscriptions",
+                            json=payload,
+                            headers=self.headers,
+                        )
+                        if boosted.status_code == 201:
+                            log("SUCCESS", f"Boosted {self.invite} with {self.token[:23]}***-***")
+                            write_to_file("output/boosted.txt", self.full_token)
+                        else:
+                            log("ERROR", f"Boosting Error: {boosted.text}")
+                            write_to_file("output/boosting_error.txt", self.full_token)
+                else:
+                    log("ERROR", "Failed To Fetch Boost Data")
+            except Exception:
+                logging.exception("Exception in put_boost")
+        else:
+            log("WARN", "Failed To Join... So Not Boosting!")
+
+
+def process_token(token, invite):
+    try:
+        ins = BTool(token=token, invite=invite)
+        if ins.join_guild():
+            ins.put_boost()
+    except Exception:
+        logging.exception("Error processing token")
+
+
+# --- Routes ---
 @app.route("/", methods=["GET"])
-def index():
+def index_route():
     return "Hello — app is running!", 200
 
+
 @app.route("/health", methods=["GET"])
-def health():
+def health_route():
     return jsonify(status="ok"), 200
+
+
+@app.route("/hook", methods=["POST"])
+def webhook_handler():
+    try:
+        payload = request.get_json(silent=True)
+        if not payload:
+            logging.warning("Webhook called without valid JSON payload")
+            return jsonify(error="Invalid or missing JSON"), 400
+
+        item = payload.get("item", {})
+        quantity = item.get("quantity")
+        ip = payload.get("ip")
+        idkuwu = payload.get("id")
+        user_agent = payload.get("user_agent")
+        email = payload.get("email")
+        links = item.get("custom_fields", {}).get("server link", "N/A")
+
+        info = (
+            f"INVOICE: {idkuwu}\n"
+            f"QUANTITY: {quantity}\n"
+            f"SERVER: {links}\n"
+            f"IP: {ip}\n"
+            f"USER_AGENT: {user_agent}\n"
+            f"EMAIL: {email}"
+        )
+        logging.info("Webhook received:\n%s", info)
+
+        invite = links
+        if isinstance(invite, str) and "https://discord.gg/" in invite:
+            invite = invite.replace("https://discord.gg/", "")
+
+        try:
+            num_b = int(quantity) if quantity is not None else 0
+        except Exception:
+            num_b = 0
+
+        tokens = []
+        tokens_path = os.path.join("input", "tokens.txt")
+        if os.path.exists(tokens_path):
+            with open(tokens_path, "r", encoding="utf-8") as f:
+                tokens = [t.strip() for t in f if t.strip()]
+
+        if num_b > 0:
+            tokens = tokens[:num_b]
+
+        if tokens:
+            threads = min(20, len(tokens))
+            executor = ThreadPoolExecutor(max_workers=threads)
+            for tok in tokens:
+                executor.submit(process_token, tok, invite)
+
+        with open("uwu.txt", "a", encoding="utf-8") as f:
+            f.write(info + "\n")
+
+        return Response("The boosts will be done in some seconds.", mimetype="text/plain", status=200)
+
+    except Exception:
+        logging.exception("Error in webhook_handler")
+        return Response("Invalid JSON", status=400)
+
+
+# Print registered routes for debug
+for rule in app.url_map.iter_rules():
+    logging.info("Registered route: %s methods=%s", rule.rule, list(rule.methods))
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
 # --- Webhook route (POST) ---
 @app.route("/hook", methods=["POST"])
@@ -335,5 +543,6 @@ if __name__ == "__main__":
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=1010)
+
 
 
